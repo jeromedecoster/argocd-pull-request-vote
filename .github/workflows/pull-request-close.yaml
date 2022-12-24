@@ -1,0 +1,35 @@
+name: pull-request-close
+
+# https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request
+# https://docs.github.com/en/developers/webhooks-and-events/webhooks/webhook-events-and-payloads#pull_request
+on:
+  pull_request:
+    types: [closed]
+
+env: 
+  REPOSITORY_NAME: "pull-request-vote-pr-${{ github.event.pull_request.number }}"
+  OVERLAY_PATH: "manifests/overlays/pr-${{ github.event.pull_request.number }}"
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      # https://github.com/actions/checkout
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      # https://github.com/aws-actions/configure-aws-credentials/tree/master
+      uses: aws-actions/configure-aws-credentials@v1-node16
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    # https://awscli.amazonaws.com/v2/documentation/api/latest/reference/ecr/delete-repository.html
+    - name: Delete Repository
+      run: |
+        if [[ -n $(aws ecr describe-repositories --repository-name ${{ env.REPOSITORY_NAME }} --query repositories[*].repositoryUri --output text 2>/dev/null) ]];
+        then
+          aws ecr delete-repository --repository-name ${{ env.REPOSITORY_NAME }} --force 
+        fi

@@ -1,0 +1,103 @@
+name: pull-request
+  
+# https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request
+# https://docs.github.com/en/developers/webhooks-and-events/webhooks/webhook-events-and-payloads#pull_request
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+env: 
+  REPOSITORY_NAME: "pull-request-vote-pr-${{ github.event.pull_request.number }}"
+  OVERLAY_PATH: "manifests/overlays/pr-${{ github.event.pull_request.number }}"
+  WEBSITE_PORT: $(echo $((30000 + ${{ github.event.pull_request.number }})))
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+
+    # https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/automating-projects-using-actions
+    # - name: echo
+    #   run: |
+    #     echo "REPOSITORY_NAME: ${{ env.REPOSITORY_NAME }}"
+    #     echo "ID ${{ github.event.pull_request.id }}"
+    #     echo "NUMBER ${{ github.event.pull_request.number }}"
+    #     echo "TITLE ${{ github.event.pull_request.title }}"
+    #     echo "URL ${{ github.event.pull_request.url }}"
+    #     echo "HTML_URL ${{ github.event.pull_request.html_url }}"
+
+    - name: Checkout
+      # https://github.com/actions/checkout
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      # https://github.com/aws-actions/configure-aws-credentials/tree/master
+      uses: aws-actions/configure-aws-credentials@v1-node16
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    # https://awscli.amazonaws.com/v2/documentation/api/latest/reference/ecr/create-repository.html
+    - name: Create Repository
+      run: |
+        if [[ -z $(aws ecr describe-repositories --repository-name ${{ env.REPOSITORY_NAME }} --query repositories[*].repositoryUri --output text 2>/dev/null) ]];
+        then
+          aws ecr create-repository --repository-name ${{ env.REPOSITORY_NAME }} --query 'repository.repositoryUri' --output text
+        fi
+
+    - name: Build, Tag, Push to Amazon ECR
+      id: build-image
+      run: |
+        log()   { echo -e "\e[30;47m ${1} \e[0m ${@:2}"; }
+
+        TAG_SHA=${{ steps.login-ecr.outputs.registry }}/${{ env.REPOSITORY_NAME }}:${GITHUB_SHA}
+        log TAG_SHA ${TAG_SHA}
+
+        cd vote
+        docker image build --tag ${TAG_SHA} .
+
+        docker push ${TAG_SHA}
+
+        echo "TAG_SHA=${TAG_SHA}" >> $GITHUB_ENV
+      
+    - name: Checkout infra
+      uses: actions/checkout@v3
+      with:
+        repository: ${{ secrets.GH_REPOSITORY_INFRA }} # jeromedecoster/argocd-pull-request-infra
+        token: ${{ secrets.GH_TOKEN }}
+        path: infra
+        fetch-depth: 0
+
+    - name: Push to infra repo
+      run: |
+        log()   { echo -e "\e[30;47m ${1} \e[0m ${@:2}"; }
+
+        log OVERLAY_PATH ${{ env.OVERLAY_PATH }}
+        log TAG_SHA ${{ env.TAG_SHA }}
+        log GITHUB_SHA ${GITHUB_SHA}
+        log WEBSITE_PORT ${{ env.WEBSITE_PORT }}
+
+        cd infra
+        mkdir --parents ${{ env.OVERLAY_PATH }}
+        export vote_namespace=vote-pr-${{ github.event.pull_request.number }}
+        export vote_image=${{ env.TAG_SHA }}
+        export vote_version=${GITHUB_SHA}
+        export vote_nodeport=${{ env.WEBSITE_PORT }}
+        envsubst < manifests/overlays/.tmpl/kustomization.yaml > ${{ env.OVERLAY_PATH }}/kustomization.yaml
+        
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git add .
+        git commit -m "github actions: ${{ env.OVERLAY_PATH }}"
+        git push
+
+    - name: Add Labels
+      uses: actions-ecosystem/action-add-labels@v1
+      with:
+        labels: |
+          preview

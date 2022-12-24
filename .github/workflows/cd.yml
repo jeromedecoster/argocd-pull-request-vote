@@ -1,0 +1,105 @@
+name: cd
+  
+on:
+  push:
+    branches:
+      - master
+
+env: 
+  REPOSITORY_NAME: "pull-request-vote"
+
+jobs:
+  build-push-to-ecr-then-update-infra-overlay:
+    runs-on: ubuntu-latest
+    # https://docs.github.com/en/actions/managing-workflow-runs/skipping-workflow-runs
+    # /!\ you can skip workflow runs triggered by the push and pull_request events by including :
+    # [skip ci]
+    # [ci skip]
+    # [no ci]
+    # [skip actions]
+    # [actions skip]
+    # in your commit message, example : git commit -m "[no ci]"
+    steps:
+    # - name: Debug
+    #   uses: actions/github-script@v6
+    #   with:
+    #     script: console.log(JSON.stringify(context, null, 2));
+
+    - name: Checkout
+      # https://github.com/actions/checkout
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      # https://github.com/aws-actions/configure-aws-credentials/tree/master
+      uses: aws-actions/configure-aws-credentials@v1-node16
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Check if version already pushed to ECR
+      run: |
+        log()   { echo -e "\e[30;47m ${1} \e[0m ${@:2}"; }
+        error() { echo -e "\e[48;5;196m ${1} \e[0m ${@:2}" >&2; }
+
+        VERSION=$(jq --raw-output '.version' vote/package.json)
+        log VERSION ${VERSION}
+
+        if [[ -n $(aws ecr list-images --repository-name pull-request-vote --query "imageIds[?imageTag == '${VERSION}'].imageTag" --output text) ]]; 
+        then
+          error ABORT pull-request-vote:${VERSION} already exists on ECR 
+          exit 1
+        fi
+
+        echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      run: |
+        log()   { echo -e "\e[30;47m ${1} \e[0m ${@:2}"; }
+
+        VERSION=${{ env.VERSION }}
+        log VERSION ${VERSION}
+
+        TAG_VERSION=${{ steps.login-ecr.outputs.registry }}/${{ env.REPOSITORY_NAME }}:${VERSION}
+        log TAG_VERSION ${TAG_VERSION}
+
+        TAG_SHA=${{ steps.login-ecr.outputs.registry }}/${{ env.REPOSITORY_NAME }}:${GITHUB_SHA}
+        log TAG_SHA ${TAG_SHA}
+        
+        cd vote
+        docker image build --tag ${TAG_VERSION} --tag ${TAG_SHA} .
+
+        docker push ${TAG_VERSION}
+        docker push ${TAG_SHA}
+
+        echo "VERSION=${VERSION}" >> $GITHUB_ENV
+        echo "TAG_VERSION=${TAG_VERSION}" >> $GITHUB_ENV
+
+    - name: Checkout infra repo
+      uses: actions/checkout@v3
+      with:
+        repository: ${{ secrets.GH_REPOSITORY_INFRA }} # jeromedecoster/argocd-pull-request-infra
+        token: ${{ secrets.GH_TOKEN }}
+        path: infra
+        fetch-depth: 0
+
+    - name: Push to infra repo
+      env:
+        OVERLAY_PATH: "manifests/overlays/master"
+      run: |
+        cd infra
+        mkdir --parents ${{ env.OVERLAY_PATH }}
+        export vote_image=${{ env.TAG_VERSION }}
+        export vote_version=${{ env.VERSION }}
+        export vote_nodeport=30000
+        envsubst < manifests/overlays/.tmpl/kustomization.yaml > ${{ env.OVERLAY_PATH }}/kustomization.yaml
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git add .
+        git commit -m "github actions: ${{ env.OVERLAY_PATH }}"
+        git push

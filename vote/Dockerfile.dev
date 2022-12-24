@@ -1,0 +1,8 @@
+FROM node:18.10-slim
+# https://stackoverflow.com/a/52430444
+ENV NODE_ENV development
+WORKDIR /app
+ADD . .
+RUN npm install
+# EXPOSE 3000 35729
+CMD npx livereload . --wait 200 --extraExts 'njk' & npx nodemon --no-update-notifier --ext js,json,njk index.js
